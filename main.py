@@ -362,7 +362,7 @@ async def list_users_by_shifts(message: types.Message):
     response += "\n".join(unassigned_users) if unassigned_users else "_\\(Нет пользователей\\)_\n"
 
 response = escape_markdown_v2(response)   
-await message.reply(response, parse_mode=ParseMode.MARKDOWN_V2)
+await message.reply(escape_markdown(response), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def check_inactivity_task():
     while True:
