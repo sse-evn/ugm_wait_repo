@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 import pytz
 import re
 
-def escape_markdown(text):
+def escape_markdown_v2(text):
+    # Все спецсимволы MarkdownV2, включая '-'
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(r'([{}])'.format(re.escape(escape_chars)), r'\\\1', text)
-load_dotenv()
 
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS').split(',')]
@@ -338,7 +338,7 @@ async def get_user_shift_command(message: types.Message):
 @dp.message(Command("list_shifts"), F.chat.type == "private")
 async def list_users_by_shifts(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.reply("У вас нет прав для выполнения этой команды.")
+        await message.reply(escape_markdown_v2("У вас нет прав для выполнения этой команды."), parse_mode=ParseMode.MARKDOWN_V2)
         return
 
     morning_users, evening_users, unassigned_users = [], [], []
@@ -346,12 +346,14 @@ async def list_users_by_shifts(message: types.Message):
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, user_name, shift FROM user_activity ORDER BY user_name")
         for user_id, user_name, shift in cursor.fetchall():
-            # IMPROVEMENT: Add a fallback for missing usernames.
             display_name = user_name or f"Пользователь {user_id}"
             user_string = f"- *{escape_markdown_v2(display_name)}* \\(`{user_id}`\\)"
-            if shift == 'morning': morning_users.append(user_string)
-            elif shift == 'evening': evening_users.append(user_string)
-            else: unassigned_users.append(user_string)
+            if shift == 'morning':
+                morning_users.append(user_string)
+            elif shift == 'evening':
+                evening_users.append(user_string)
+            else:
+                unassigned_users.append(user_string)
 
     response = "👥 *Распределение пользователей по сменам:*\n\n"
     response += f"🌞 *Утренняя смена \\({MORNING_SHIFT_START_HOUR:02d}:00 \\- {MORNING_SHIFT_END_HOUR:02d}:00\\):*\n"
@@ -361,8 +363,7 @@ async def list_users_by_shifts(message: types.Message):
     response += "\n\n❓ *Неназначенные пользователи:*\n"
     response += "\n".join(unassigned_users) if unassigned_users else "_\\(Нет пользователей\\)_\n"
 
-response = escape_markdown_v2(response)   
-await message.reply(escape_markdown(response), parse_mode=ParseMode.MARKDOWN_V2)
+    await message.reply(escape_markdown_v2(response), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def check_inactivity_task():
     while True:
