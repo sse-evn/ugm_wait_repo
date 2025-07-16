@@ -44,6 +44,9 @@ DB_NAME = 'bot_data.db'
 # --- Вспомогательная функция для экранирования символов MarkdownV2 ---
 def escape_markdown_v2(text: str) -> str:
     """Экранирует специальные символы для форматирования MarkdownV2."""
+    # Обратите внимание на порядок: сначала экранируем символы, которые могут быть частью других символов (например, []()
+    # А затем уже отдельные символы.
+    # Добавил '-' в список экранируемых символов.
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return "".join(['\\' + char if char in escape_chars else char for char in text])
 
@@ -452,7 +455,7 @@ async def list_users_by_shifts(message: types.Message):
                 unassigned_users.append(f"- **{escaped_user_name}** \\(`{user_id}`\\)")
 
     response = "👥 **Распределение пользователей по сменам:**\n\n"
-    # Экранируем скобки в заголовках смен
+    # Экранируем скобки и дефисы в заголовках смен
     response += "🌞 **Утренняя смена \\(07:00 \\- 15:00\\):**\n"
     response += "\n".join(morning_users) if morning_users else "\\(Нет пользователей\\)\n"
     response += "\n\n🌙 **Вечерняя смена \\(15:00 \\- 23:00\\):**\n"
