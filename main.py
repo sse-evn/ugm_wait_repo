@@ -1,12 +1,12 @@
 import asyncio
 import sqlite3
-from aiogram import Bot, Dispatcher, types, F # Импортируем F для фильтров
-from aiogram.filters import Command # Импортируем Command для команд
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.enums import ParseMode
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 
-# --- Загрузка переменных окружения из .env файла ---
 load_dotenv()
 
 API_TOKEN = os.getenv('BOT_TOKEN')
@@ -21,22 +21,18 @@ MORNING_SHIFT_END_HOUR = int(os.getenv('MORNING_SHIFT_END_HOUR'))
 EVENING_SHIFT_START_HOUR = int(os.getenv('EVENING_SHIFT_START_HOUR'))
 EVENING_SHIFT_END_HOUR = int(os.getenv('EVENING_SHIFT_END_HOUR'))
 
-# Проверки на наличие обязательных переменных
 if not all([API_TOKEN, ADMIN_IDS, SOURCE_CHAT_IDS, DESTINATION_CHAT_ID,
             INACTIVITY_THRESHOLD_MINUTES, INACTIVITY_CHECK_INTERVAL_SECONDS,
             MORNING_SHIFT_START_HOUR, MORNING_SHIFT_END_HOUR,
             EVENING_SHIFT_START_HOUR, EVENING_SHIFT_END_HOUR]):
     raise ValueError("One or more essential environment variables are not set. Check your .env file.")
 
-# --- Инициализация бота и диспетчера ---
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher() # Corrected: No arguments for Dispatcher in aiogram 3.x
+dp = Dispatcher()
 
-# --- Функции для работы с базой данных (без изменений) ---
 DB_NAME = 'bot_data.db'
 
 def init_db():
-    """Инициализирует базу данных и создает таблицы, если их нет."""
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -54,7 +50,6 @@ def init_db():
                 shift TEXT DEFAULT 'unassigned'
             )
         ''')
-        # Проверяем, существует ли столбец 'shift' и добавляем его, если нет
         try:
             cursor.execute("ALTER TABLE user_activity ADD COLUMN shift TEXT DEFAULT 'unassigned'")
         except sqlite3.OperationalError as e:
@@ -138,7 +133,6 @@ def get_user_by_id(user_id: int):
             return {'user_id': result[0], 'user_name': result[1], 'shift': result[2]}
         return None
 
-# --- Вспомогательные функции для расписания (без изменений) ---
 def get_current_shift():
     current_hour = datetime.now().hour
     if MORNING_SHIFT_START_HOUR <= current_hour < MORNING_SHIFT_END_HOUR:
@@ -151,15 +145,11 @@ def get_current_shift():
 def is_bot_active_now():
     return get_current_shift() in ['morning', 'evening']
 
-# --- Важное изменение: Вызов init_db() здесь ---
 init_db()
 
-# --- Глобальные переменные для кэша и отслеживания уведомлений ---
 ignored_users_cache = get_ignored_users()
 notified_inactive_users_cache = set()
 
-# --- Обработчик сообщений для пересылки (обновлено) ---
-# Использование F.chat.id.in_ для фильтрации по ID чатов
 @dp.message(F.chat.id.in_(SOURCE_CHAT_IDS))
 async def forward_messages(message: types.Message):
     if not is_bot_active_now():
@@ -188,22 +178,19 @@ async def forward_messages(message: types.Message):
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при пересылке сообщения (ID: {message.message_id}) от {user_full_name} из чата {message.chat.id}: {e}")
 
-# --- Команды для управления списками (обновлено) ---
-
-# Использование Command и F.chat.type
 @dp.message(Command("ignore"), F.chat.type == "private")
 async def add_to_ignore_list(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.text.split(maxsplit=1) # Получаем аргументы команды
+    args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply("Использование: /ignore <user_id>")
         return
 
     try:
-        target_user_id = int(args[1]) # Аргумент находится на втором месте
+        target_user_id = int(args[1])
         user_info = None
         for chat_id in SOURCE_CHAT_IDS:
             try:
@@ -219,11 +206,11 @@ async def add_to_ignore_list(message: types.Message):
             add_ignored_user(target_user_id, user_full_name)
             ignored_users_cache[target_user_id] = user_full_name
             await message.reply(f"Пользователь **{user_full_name}** (ID: `{target_user_id}`) добавлен в список игнорируемых.",
-                                parse_mode=types.ParseMode.MARKDOWN)
+                                parse_mode=ParseMode.MARKDOWN_V2)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Добавлен в игнор: {user_full_name} ({target_user_id})")
         else:
             await message.reply(f"Пользователь **{user_full_name}** (ID: `{target_user_id}`) уже находится в списке игнорируемых.",
-                                parse_mode=types.ParseMode.MARKDOWN)
+                                parse_mode=ParseMode.MARKDOWN_V2)
 
     except ValueError:
         await message.reply("Некорректный ID пользователя. ID должен быть числом.")
@@ -247,11 +234,11 @@ async def remove_from_ignore_list(message: types.Message):
             user_full_name = ignored_users_cache.pop(target_user_id)
             remove_ignored_user(target_user_id)
             await message.reply(f"Пользователь **{user_full_name}** (ID: `{target_user_id}`) удален из списка игнорируемых.",
-                                parse_mode=types.ParseMode.MARKDOWN)
+                                parse_mode=ParseMode.MARKDOWN_V2)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Удален из игнора: {user_full_name} ({target_user_id})")
         else:
             await message.reply(f"Пользователь с ID `{target_user_id}` не найден в списке игнорируемых.",
-                                parse_mode=types.ParseMode.MARKDOWN)
+                                parse_mode=ParseMode.MARKDOWN_V2)
     except ValueError:
         await message.reply("Некорректный ID пользователя. ID должен быть числом.")
     except Exception as e:
@@ -274,7 +261,7 @@ async def show_ignored_users(message: types.Message):
     for user_id, user_name in ignored_users_cache.items():
         response += f"- **{user_name}** (ID: `{user_id}`)\n"
 
-    await message.reply(response, parse_mode=types.ParseMode.MARKDOWN)
+    await message.reply(response, parse_mode=ParseMode.MARKDOWN_V2)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Показан список игнорируемых пользователей.")
 
 @dp.message(Command("top_users"), F.chat.type == "private")
@@ -299,18 +286,18 @@ async def show_top_users(message: types.Message):
 
     response_header = "📊 **Топ пользователей по пересланным сообщениям**"
     if shift_filter == 'morning':
-        response_header += " (Утренняя смена):"
+        response_header += " \\(Утренняя смена\\):"
     elif shift_filter == 'evening':
-        response_header += " (Вечерняя смена):"
+        response_header += " \\(Вечерняя смена\\):"
     else:
-        response_header += " (Все смены):"
+        response_header += " \\(Все смены\\):"
     response_header += "\n\n"
 
     response = response_header
     for i, (user_id, user_name, forwarded_count) in enumerate(top_list):
-        response += f"{i+1}. **{user_name}** (ID: `{user_id}`) - `{forwarded_count}` сообщений\n"
+        response += f"{i+1}\\. **{user_name}** \\(ID: `{user_id}`\\) \\- `{forwarded_count}` сообщений\n"
 
-    await message.reply(response, parse_mode=types.ParseMode.MARKDOWN)
+    await message.reply(response, parse_mode=ParseMode.MARKDOWN_V2)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Показан топ пользователей (фильтр: {shift_filter or 'нет'}).")
 
 @dp.message(Command("set_shift"), F.chat.type == "private")
@@ -319,7 +306,7 @@ async def set_user_shift_command(message: types.Message):
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.text.split(maxsplit=2) # Делим на 3 части: команда, ID, смена
+    args = message.text.split(maxsplit=2)
     if len(args) != 3:
         await message.reply("Использование: /set_shift <user_id> <morning|evening|unassigned>")
         return
@@ -345,10 +332,9 @@ async def set_user_shift_command(message: types.Message):
                     continue
             user_name = user_info.full_name if user_info else f"Неизвестный пользователь (ID: {target_user_id})"
 
-
         set_user_shift(target_user_id, user_name, shift_type)
         await message.reply(f"Смена для пользователя **{user_name}** (ID: `{target_user_id}`) установлена на **{shift_type}**.",
-                            parse_mode=types.ParseMode.MARKDOWN)
+                            parse_mode=ParseMode.MARKDOWN_V2)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Смена пользователя {user_name} ({target_user_id}) установлена на {shift_type}.")
 
     except ValueError:
@@ -373,10 +359,10 @@ async def get_user_shift_command(message: types.Message):
 
         if user_data:
             await message.reply(f"Пользователь **{user_data['user_name']}** (ID: `{user_data['user_id']}`) находится в смене: **{user_data['shift']}**.",
-                                parse_mode=types.ParseMode.MARKDOWN)
+                                parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await message.reply(f"Информация о пользователе с ID `{target_user_id}` не найдена в базе данных.",
-                                parse_mode=types.ParseMode.MARKDOWN)
+                                parse_mode=ParseMode.MARKDOWN_V2)
     except ValueError:
         await message.reply("Некорректный ID пользователя. ID должен быть числом.")
     except Exception as e:
@@ -397,24 +383,23 @@ async def list_users_by_shifts(message: types.Message):
         cursor.execute("SELECT user_id, user_name, shift FROM user_activity ORDER BY user_name")
         for user_id, user_name, shift in cursor.fetchall():
             if shift == 'morning':
-                morning_users.append(f"- **{user_name}** (`{user_id}`)")
+                morning_users.append(f"- **{user_name}** \\(`{user_id}`\\)")
             elif shift == 'evening':
-                evening_users.append(f"- **{user_name}** (`{user_id}`)")
+                evening_users.append(f"- **{user_name}** \\(`{user_id}`\\)")
             else:
-                unassigned_users.append(f"- **{user_name}** (`{user_id}`)")
+                unassigned_users.append(f"- **{user_name}** \\(`{user_id}`\\)")
 
     response = "👥 **Распределение пользователей по сменам:**\n\n"
-    response += "🌞 **Утренняя смена (07:00 - 15:00):**\n"
-    response += "\n".join(morning_users) if morning_users else "_(Нет пользователей)_\n"
-    response += "\n\n🌙 **Вечерняя смена (15:00 - 23:00):**\n"
-    response += "\n".join(evening_users) if evening_users else "_(Нет пользователей)_\n"
+    response += "🌞 **Утренняя смена (07:00 \\- 15:00):**\n"
+    response += "\n".join(morning_users) if morning_users else "\\(Нет пользователей\\)\n"
+    response += "\n\n🌙 **Вечерняя смена (15:00 \\- 23:00):**\n"
+    response += "\n".join(evening_users) if evening_users else "\\(Нет пользователей\\)\n"
     response += "\n\n❓ **Неназначенные пользователи:**\n"
-    response += "\n".join(unassigned_users) if unassigned_users else "_(Нет пользователей)_\n"
+    response += "\n".join(unassigned_users) if unassigned_users else "\\(Нет пользователей\\)\n"
 
-    await message.reply(response, parse_mode=types.ParseMode.MARKDOWN)
+    await message.reply(response, parse_mode=ParseMode.MARKDOWN_V2)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Показан список пользователей по сменам.")
 
-# --- Фоновая задача для проверки неактивности (без изменений в логике, только синтаксис) ---
 async def check_inactivity_task():
     while True:
         await asyncio.sleep(INACTIVITY_CHECK_INTERVAL_SECONDS)
@@ -433,26 +418,22 @@ async def check_inactivity_task():
         for user_id, user_name, last_activity_dt, user_shift in inactive_users:
             if user_id not in notified_inactive_users_cache:
                 message_text = (
-                    f"⚠️ Пользователь **{user_name}** (ID: `{user_id}`) из **{user_shift.capitalize()}** смены "
-                    f"не проявлял активности более {INACTIVITY_THRESHOLD_MINUTES} минут. "
+                    f"⚠️ Пользователь **{user_name}** \\(ID: `{user_id}`\\) из **{user_shift.capitalize()}** смены "
+                    f"не проявлял активности более {INACTIVITY_THRESHOLD_MINUTES} минут\\.\n"
                     f"Последняя активность: {last_activity_dt.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 for admin_id in ADMIN_IDS:
                     try:
-                        await bot.send_message(admin_id, message_text, parse_mode=types.ParseMode.MARKDOWN)
+                        await bot.send_message(admin_id, message_text, parse_mode=ParseMode.MARKDOWN_V2)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Отправлено уведомление админу {admin_id} о неактивности: {user_name} ({user_id})")
                     except Exception as e:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при отправке уведомления админу {admin_id}: {e}")
                 notified_inactive_users_cache.add(user_id)
 
-# --- Главная функция запуска бота ---
 async def main():
-    """
-    Главная функция запуска бота.
-    """
     asyncio.create_task(check_inactivity_task())
     print("Бот запускается...")
-    await dp.start_polling(bot) # Передаем bot instance в start_polling
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
