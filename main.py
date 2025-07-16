@@ -6,13 +6,14 @@ from aiogram.enums import ParseMode
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
+import pytz # Импортируем pytz
 
 load_dotenv()
 
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS').split(',')]
 SOURCE_CHAT_IDS = [int(x) for x in os.getenv('SOURCE_CHAT_IDS').split(',')]
-DESTINATION_CHAT_ID = int(os.getenv('DESTINATION_CHAT_ID'))
+DESTINATION_CHAT_ID = int(os.getenv('DESTINATION_CHAT_ID')) 
 INACTIVITY_THRESHOLD_MINUTES = int(os.getenv('INACTIVITY_THRESHOLD_MINUTES'))
 INACTIVITY_CHECK_INTERVAL_SECONDS = int(os.getenv('INACTIVITY_CHECK_INTERVAL_SECONDS'))
 
@@ -20,6 +21,9 @@ MORNING_SHIFT_START_HOUR = int(os.getenv('MORNING_SHIFT_START_HOUR'))
 MORNING_SHIFT_END_HOUR = int(os.getenv('MORNING_SHIFT_END_HOUR'))
 EVENING_SHIFT_START_HOUR = int(os.getenv('EVENING_SHIFT_START_HOUR'))
 EVENING_SHIFT_END_HOUR = int(os.getenv('EVENING_SHIFT_END_HOUR'))
+
+# Определяем часовой пояс UTC+5
+TARGET_TIMEZONE = pytz.timezone('Asia/Almaty') # Или другой подходящий часовой пояс для UTC+5
 
 if not all([API_TOKEN, ADMIN_IDS, SOURCE_CHAT_IDS, DESTINATION_CHAT_ID,
             INACTIVITY_THRESHOLD_MINUTES, INACTIVITY_CHECK_INTERVAL_SECONDS,
@@ -101,13 +105,23 @@ def get_top_users(limit: int = 10, shift: str = None):
 
 def get_inactive_users(threshold_minutes: int, current_active_shift: str):
     inactive_users = []
-    threshold_time = datetime.now() - timedelta(minutes=threshold_minutes)
+    # Теперь threshold_time также будет сравниваться с временем в целевом часовом поясе
+    now_in_target_tz = datetime.now(TARGET_TIMEZONE)
+    threshold_time = now_in_target_tz - timedelta(minutes=threshold_minutes)
+
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, user_name, last_activity_time, shift FROM user_activity")
         for user_id, user_name, last_activity_str, user_shift in cursor.fetchall():
             try:
+                # Парсим как naive datetime, затем делаем его timezone-aware
                 last_activity_dt = datetime.fromisoformat(last_activity_str)
+                # Убедимся, что last_activity_dt тоже в нужном часовом поясе
+                if last_activity_dt.tzinfo is None: # Если дата не имеет информации о часовом поясе
+                     last_activity_dt = TARGET_TIMEZONE.localize(last_activity_dt)
+                else: # Если уже есть tzinfo, конвертируем
+                    last_activity_dt = last_activity_dt.astimezone(TARGET_TIMEZONE)
+
                 if user_shift == current_active_shift and last_activity_dt < threshold_time:
                     inactive_users.append((user_id, user_name, last_activity_dt, user_shift))
             except ValueError:
@@ -118,8 +132,10 @@ def get_inactive_users(threshold_minutes: int, current_active_shift: str):
 def set_user_shift(user_id: int, user_name: str, shift: str):
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
+        # Сохраняем время в формате ISO, но теперь это время будет из целевого TZ
+        current_time_in_target_tz = datetime.now(TARGET_TIMEZONE).isoformat()
         cursor.execute("INSERT OR IGNORE INTO user_activity (user_id, user_name, messages_forwarded, last_activity_time, shift) VALUES (?, ?, 0, ?, ?)",
-                       (user_id, user_name, datetime.now().isoformat(), 'unassigned'))
+                       (user_id, user_name, current_time_in_target_tz, 'unassigned'))
         cursor.execute("UPDATE user_activity SET shift = ?, user_name = ? WHERE user_id = ?",
                        (shift, user_name, user_id))
         conn.commit()
@@ -134,7 +150,8 @@ def get_user_by_id(user_id: int):
         return None
 
 def get_current_shift():
-    current_hour = datetime.now().hour
+    # Получаем текущий час в целевом часовом поясе
+    current_hour = datetime.now(TARGET_TIMEZONE).hour
     if MORNING_SHIFT_START_HOUR <= current_hour < MORNING_SHIFT_END_HOUR:
         return 'morning'
     elif EVENING_SHIFT_START_HOUR <= current_hour < EVENING_SHIFT_END_HOUR:
@@ -151,13 +168,14 @@ ignored_users_cache = get_ignored_users()
 notified_inactive_users_cache = set()
 
 @dp.message(F.chat.id.in_(SOURCE_CHAT_IDS))
-async def forward_messages(message: types.Message):
+async def update_user_activity_on_message(message: types.Message):
     if not is_bot_active_now():
         return
 
     user_id = message.from_user.id
     user_full_name = message.from_user.full_name or f"Пользователь {user_id}"
-    current_time_str = datetime.now().isoformat()
+    # Сохраняем время в базе данных уже в целевом часовом поясе
+    current_time_str = datetime.now(TARGET_TIMEZONE).isoformat()
 
     if user_id in notified_inactive_users_cache:
         notified_inactive_users_cache.remove(user_id)
@@ -167,16 +185,10 @@ async def forward_messages(message: types.Message):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Игнорируем сообщение от {user_full_name} ({user_id}) в группе {message.chat.title} ({message.chat.id}).")
         return
 
-    try:
-        await bot.copy_message(chat_id=DESTINATION_CHAT_ID,
-                               from_chat_id=message.chat.id,
-                               message_id=message.message_id)
+    update_user_activity(user_id, user_full_name, current_time_str)
 
-        update_user_activity(user_id, user_full_name, current_time_str)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Активность пользователя {user_full_name} ({user_id}) в группе {message.chat.title} ({message.chat.id}) обновлена.")
 
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Сообщение (ID: {message.message_id}) от {user_full_name} из группы {message.chat.title} ({message.chat.id}) успешно переслано в группу {DESTINATION_CHAT_ID}.")
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при пересылке сообщения (ID: {message.message_id}) от {user_full_name} из чата {message.chat.id}: {e}")
 
 @dp.message(Command("ignore"), F.chat.type == "private")
 async def add_to_ignore_list(message: types.Message):
@@ -417,17 +429,18 @@ async def check_inactivity_task():
 
         for user_id, user_name, last_activity_dt, user_shift in inactive_users:
             if user_id not in notified_inactive_users_cache:
+                # Форматируем время последней активности в целевом часовом поясе для сообщения
+                formatted_last_activity = last_activity_dt.strftime('%Y-%m-%d %H:%M:%S %Z%z')
                 message_text = (
                     f"⚠️ Пользователь **{user_name}** \\(ID: `{user_id}`\\) из **{user_shift.capitalize()}** смены "
                     f"не проявлял активности более {INACTIVITY_THRESHOLD_MINUTES} минут\\.\n"
-                    f"Последняя активность: {last_activity_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                    f"Последняя активность: {formatted_last_activity}"
                 )
-                for admin_id in ADMIN_IDS:
-                    try:
-                        await bot.send_message(admin_id, message_text, parse_mode=ParseMode.MARKDOWN_V2)
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Отправлено уведомление админу {admin_id} о неактивности: {user_name} ({user_id})")
-                    except Exception as e:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при отправке уведомления админу {admin_id}: {e}")
+                try:
+                    await bot.send_message(DESTINATION_CHAT_ID, message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Отправлено уведомление в группу {DESTINATION_CHAT_ID} о неактивности: {user_name} ({user_id})")
+                except Exception as e:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при отправке уведомления в группу {DESTINATION_CHAT_ID}: {e}")
                 notified_inactive_users_cache.add(user_id)
 
 async def main():
