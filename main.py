@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F # Импортируем F для фильтров
+from aiogram.filters import Command # Импортируем Command для команд
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
@@ -20,7 +21,6 @@ MORNING_SHIFT_END_HOUR = int(os.getenv('MORNING_SHIFT_END_HOUR'))
 EVENING_SHIFT_START_HOUR = int(os.getenv('EVENING_SHIFT_START_HOUR'))
 EVENING_SHIFT_END_HOUR = int(os.getenv('EVENING_SHIFT_END_HOUR'))
 
-
 # Проверки на наличие обязательных переменных
 if not all([API_TOKEN, ADMIN_IDS, SOURCE_CHAT_IDS, DESTINATION_CHAT_ID,
             INACTIVITY_THRESHOLD_MINUTES, INACTIVITY_CHECK_INTERVAL_SECONDS,
@@ -28,11 +28,11 @@ if not all([API_TOKEN, ADMIN_IDS, SOURCE_CHAT_IDS, DESTINATION_CHAT_ID,
             EVENING_SHIFT_START_HOUR, EVENING_SHIFT_END_HOUR]):
     raise ValueError("One or more essential environment variables are not set. Check your .env file.")
 
-# --- Инициализация диспетчера (без bot) ---
+# --- Инициализация бота и диспетчера ---
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher() # Corrected line: Removed (bot) argument
+dp = Dispatcher() # Corrected: No arguments for Dispatcher in aiogram 3.x
 
-# --- Функции для работы с базой данных ---
+# --- Функции для работы с базой данных (без изменений) ---
 DB_NAME = 'bot_data.db'
 
 def init_db():
@@ -62,13 +62,7 @@ def init_db():
                 raise
         conn.commit()
 
-# --- Functions for DB operations (get_ignored_users, add_ignored_user, etc.) remain the same ---
-# ... (your existing get_ignored_users, add_ignored_user, remove_ignored_user,
-# update_user_activity, get_top_users, get_inactive_users, set_user_shift,
-# get_user_by_id functions here) ...
-
 def get_ignored_users():
-    """Возвращает словарь игнорируемых пользователей из БД."""
     ignored = {}
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
@@ -78,7 +72,6 @@ def get_ignored_users():
     return ignored
 
 def add_ignored_user(user_id: int, user_name: str):
-    """Добавляет пользователя в список игнорируемых в БД."""
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO ignored_users (user_id, user_name) VALUES (?, ?)",
@@ -86,26 +79,21 @@ def add_ignored_user(user_id: int, user_name: str):
         conn.commit()
 
 def remove_ignored_user(user_id: int):
-    """Удаляет пользователя из списка игнорируемых в БД."""
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM ignored_users WHERE user_id = ?", (user_id,))
         conn.commit()
 
 def update_user_activity(user_id: int, user_name: str, current_time_str: str):
-    """Обновляет счетчик пересланных сообщений и время последней активности для пользователя в БД."""
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
-        # Проверяем, существует ли пользователь. Если нет, вставляем с начальными значениями.
         cursor.execute("INSERT OR IGNORE INTO user_activity (user_id, user_name, messages_forwarded, last_activity_time, shift) VALUES (?, ?, 0, ?, ?)",
-                       (user_id, user_name, current_time_str, 'unassigned')) # Use unassigned as default shift
-        # Обновляем данные пользователя
+                       (user_id, user_name, current_time_str, 'unassigned'))
         cursor.execute("UPDATE user_activity SET messages_forwarded = messages_forwarded + 1, user_name = ?, last_activity_time = ? WHERE user_id = ?",
                        (user_name, current_time_str, user_id))
         conn.commit()
 
 def get_top_users(limit: int = 10, shift: str = None):
-    """Возвращает топ пользователей по количеству пересланных сообщений, опционально по смене."""
     top_users = []
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
@@ -117,7 +105,6 @@ def get_top_users(limit: int = 10, shift: str = None):
     return top_users
 
 def get_inactive_users(threshold_minutes: int, current_active_shift: str):
-    """Возвращает список пользователей, неактивных дольше заданного порога и относящихся к текущей активной смене."""
     inactive_users = []
     threshold_time = datetime.now() - timedelta(minutes=threshold_minutes)
     with sqlite3.connect(DB_NAME) as conn:
@@ -126,7 +113,6 @@ def get_inactive_users(threshold_minutes: int, current_active_shift: str):
         for user_id, user_name, last_activity_str, user_shift in cursor.fetchall():
             try:
                 last_activity_dt = datetime.fromisoformat(last_activity_str)
-                # Проверяем неактивность только для пользователей текущей активной смены
                 if user_shift == current_active_shift and last_activity_dt < threshold_time:
                     inactive_users.append((user_id, user_name, last_activity_dt, user_shift))
             except ValueError:
@@ -135,17 +121,15 @@ def get_inactive_users(threshold_minutes: int, current_active_shift: str):
     return inactive_users
 
 def set_user_shift(user_id: int, user_name: str, shift: str):
-    """Устанавливает или обновляет смену для пользователя в БД."""
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO user_activity (user_id, user_name, messages_forwarded, last_activity_time, shift) VALUES (?, ?, 0, ?, ?)",
-                       (user_id, user_name, datetime.now().isoformat(), 'unassigned')) # Use unassigned as default shift
+                       (user_id, user_name, datetime.now().isoformat(), 'unassigned'))
         cursor.execute("UPDATE user_activity SET shift = ?, user_name = ? WHERE user_id = ?",
                        (shift, user_name, user_id))
         conn.commit()
 
 def get_user_by_id(user_id: int):
-    """Получает информацию о пользователе из user_activity."""
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, user_name, shift FROM user_activity WHERE user_id = ?", (user_id,))
@@ -154,35 +138,29 @@ def get_user_by_id(user_id: int):
             return {'user_id': result[0], 'user_name': result[1], 'shift': result[2]}
         return None
 
-
-# --- Вспомогательные функции для расписания ---
+# --- Вспомогательные функции для расписания (без изменений) ---
 def get_current_shift():
-    """Определяет, какая смена сейчас активна."""
     current_hour = datetime.now().hour
     if MORNING_SHIFT_START_HOUR <= current_hour < MORNING_SHIFT_END_HOUR:
         return 'morning'
     elif EVENING_SHIFT_START_HOUR <= current_hour < EVENING_SHIFT_END_HOUR:
         return 'evening'
     else:
-        return 'off_shift' # Вне рабочих смен
+        return 'off_shift'
 
 def is_bot_active_now():
-    """Проверяет, должен ли бот сейчас работать (находится ли в активной смене)."""
     return get_current_shift() in ['morning', 'evening']
 
 # --- Важное изменение: Вызов init_db() здесь ---
-# Это гарантирует, что таблицы созданы до того, как мы пытаемся читать из БД.
 init_db()
 
 # --- Глобальные переменные для кэша и отслеживания уведомлений ---
-# Теперь эти строки безопасны, так как init_db() уже был вызван.
 ignored_users_cache = get_ignored_users()
 notified_inactive_users_cache = set()
 
-# ... (the rest of your message handlers and check_inactivity_task remain the same) ...
-
-# --- Обработчик сообщений для пересылки ---
-@dp.message_handler(content_types=types.ContentType.ANY, chat_id=SOURCE_CHAT_IDS)
+# --- Обработчик сообщений для пересылки (обновлено) ---
+# Использование F.chat.id.in_ для фильтрации по ID чатов
+@dp.message(F.chat.id.in_(SOURCE_CHAT_IDS))
 async def forward_messages(message: types.Message):
     if not is_bot_active_now():
         return
@@ -210,20 +188,22 @@ async def forward_messages(message: types.Message):
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при пересылке сообщения (ID: {message.message_id}) от {user_full_name} из чата {message.chat.id}: {e}")
 
-# ... (all your command handlers remain the same) ...
-@dp.message_handler(commands=['ignore'], chat_type=types.ChatType.PRIVATE)
+# --- Команды для управления списками (обновлено) ---
+
+# Использование Command и F.chat.type
+@dp.message(Command("ignore"), F.chat.type == "private")
 async def add_to_ignore_list(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.get_args().split()
-    if not args:
+    args = message.text.split(maxsplit=1) # Получаем аргументы команды
+    if len(args) < 2:
         await message.reply("Использование: /ignore <user_id>")
         return
 
     try:
-        target_user_id = int(args[0])
+        target_user_id = int(args[1]) # Аргумент находится на втором месте
         user_info = None
         for chat_id in SOURCE_CHAT_IDS:
             try:
@@ -250,19 +230,19 @@ async def add_to_ignore_list(message: types.Message):
     except Exception as e:
         await message.reply(f"Произошла ошибка: {e}")
 
-@dp.message_handler(commands=['unignore'], chat_type=types.ChatType.PRIVATE)
+@dp.message(Command("unignore"), F.chat.type == "private")
 async def remove_from_ignore_list(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.get_args().split()
-    if not args:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         await message.reply("Использование: /unignore <user_id>")
         return
 
     try:
-        target_user_id = int(args[0])
+        target_user_id = int(args[1])
         if target_user_id in ignored_users_cache:
             user_full_name = ignored_users_cache.pop(target_user_id)
             remove_ignored_user(target_user_id)
@@ -277,7 +257,7 @@ async def remove_from_ignore_list(message: types.Message):
     except Exception as e:
         await message.reply(f"Произошла ошибка: {e}")
 
-@dp.message_handler(commands=['ignored_users'], chat_type=types.ChatType.PRIVATE)
+@dp.message(Command("ignored_users"), F.chat.type == "private")
 async def show_ignored_users(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
@@ -297,16 +277,16 @@ async def show_ignored_users(message: types.Message):
     await message.reply(response, parse_mode=types.ParseMode.MARKDOWN)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Показан список игнорируемых пользователей.")
 
-@dp.message_handler(commands=['top_users'], chat_type=types.ChatType.PRIVATE)
+@dp.message(Command("top_users"), F.chat.type == "private")
 async def show_top_users(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.get_args().split()
+    args = message.text.split(maxsplit=1)
     shift_filter = None
-    if args and args[0].lower() in ['morning', 'evening', 'all']:
-        shift_filter = args[0].lower()
+    if len(args) > 1 and args[1].lower() in ['morning', 'evening', 'all']:
+        shift_filter = args[1].lower()
 
     top_list = get_top_users(shift=shift_filter)
 
@@ -333,20 +313,20 @@ async def show_top_users(message: types.Message):
     await message.reply(response, parse_mode=types.ParseMode.MARKDOWN)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Показан топ пользователей (фильтр: {shift_filter or 'нет'}).")
 
-@dp.message_handler(commands=['set_shift'], chat_type=types.ChatType.PRIVATE)
+@dp.message(Command("set_shift"), F.chat.type == "private")
 async def set_user_shift_command(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.get_args().split()
-    if len(args) != 2:
+    args = message.text.split(maxsplit=2) # Делим на 3 части: команда, ID, смена
+    if len(args) != 3:
         await message.reply("Использование: /set_shift <user_id> <morning|evening|unassigned>")
         return
 
     try:
-        target_user_id = int(args[0])
-        shift_type = args[1].lower()
+        target_user_id = int(args[1])
+        shift_type = args[2].lower()
         if shift_type not in ['morning', 'evening', 'unassigned']:
             await message.reply("Некорректный тип смены. Допустимые значения: `morning`, `evening`, `unassigned`.")
             return
@@ -376,19 +356,19 @@ async def set_user_shift_command(message: types.Message):
     except Exception as e:
         await message.reply(f"Произошла ошибка: {e}")
 
-@dp.message_handler(commands=['get_shift'], chat_type=types.ChatType.PRIVATE)
+@dp.message(Command("get_shift"), F.chat.type == "private")
 async def get_user_shift_command(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
         return
 
-    args = message.get_args().split()
-    if not args:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         await message.reply("Использование: /get_shift <user_id>")
         return
 
     try:
-        target_user_id = int(args[0])
+        target_user_id = int(args[1])
         user_data = get_user_by_id(target_user_id)
 
         if user_data:
@@ -402,7 +382,7 @@ async def get_user_shift_command(message: types.Message):
     except Exception as e:
         await message.reply(f"Произошла ошибка: {e}")
 
-@dp.message_handler(commands=['list_shifts'], chat_type=types.ChatType.PRIVATE)
+@dp.message(Command("list_shifts"), F.chat.type == "private")
 async def list_users_by_shifts(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("У вас нет прав для выполнения этой команды.")
@@ -434,7 +414,7 @@ async def list_users_by_shifts(message: types.Message):
     await message.reply(response, parse_mode=types.ParseMode.MARKDOWN)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Показан список пользователей по сменам.")
 
-# --- Фоновая задача для проверки неактивности ---
+# --- Фоновая задача для проверки неактивности (без изменений в логике, только синтаксис) ---
 async def check_inactivity_task():
     while True:
         await asyncio.sleep(INACTIVITY_CHECK_INTERVAL_SECONDS)
@@ -465,15 +445,14 @@ async def check_inactivity_task():
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка при отправке уведомления админу {admin_id}: {e}")
                 notified_inactive_users_cache.add(user_id)
 
+# --- Главная функция запуска бота ---
 async def main():
     """
     Главная функция запуска бота.
-    `init_db()` is already called globally before the caches are populated.
     """
-    asyncio.create_task(check_inactivity_task()) # Запускаем фоновую задачу для проверки активности
+    asyncio.create_task(check_inactivity_task())
     print("Бот запускается...")
-    # Passing the bot instance to start_polling for aiogram 3.x
-    await dp.start_polling(bot) # Corrected line: Pass bot instance here
+    await dp.start_polling(bot) # Передаем bot instance в start_polling
 
 if __name__ == '__main__':
     asyncio.run(main())
