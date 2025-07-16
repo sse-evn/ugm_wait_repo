@@ -335,10 +335,11 @@ async def get_user_shift_command(message: types.Message):
     except Exception as e:
         await message.reply(f"Произошла ошибка: {escape_markdown_v2(str(e))}", parse_mode=ParseMode.MARKDOWN_V2)
 
+
 @dp.message(Command("list_shifts"), F.chat.type == "private")
 async def list_users_by_shifts(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.reply(escape_markdown_v2("У вас нет прав для выполнения этой команды."), parse_mode=ParseMode.MARKDOWN_V2)
+        await message.reply(escape_markdown("У вас нет прав для выполнения этой команды."), parse_mode=ParseMode.MARKDOWN_V2)
         return
 
     morning_users, evening_users, unassigned_users = [], [], []
@@ -347,7 +348,8 @@ async def list_users_by_shifts(message: types.Message):
         cursor.execute("SELECT user_id, user_name, shift FROM user_activity ORDER BY user_name")
         for user_id, user_name, shift in cursor.fetchall():
             display_name = user_name or f"Пользователь {user_id}"
-            user_string = f"- *{escape_markdown_v2(display_name)}* \\(`{user_id}`\\)"
+            # Экранируем display_name и user_id
+            user_string = f"- *{escape_markdown(display_name)}* \\(`{escape_markdown(str(user_id))}`\\)"
             if shift == 'morning':
                 morning_users.append(user_string)
             elif shift == 'evening':
@@ -363,8 +365,7 @@ async def list_users_by_shifts(message: types.Message):
     response += "\n\n❓ *Неназначенные пользователи:*\n"
     response += "\n".join(unassigned_users) if unassigned_users else "_\\(Нет пользователей\\)_\n"
 
-    await message.reply(escape_markdown_v2(response), parse_mode=ParseMode.MARKDOWN_V2)
-
+    await message.reply(escape_markdown(response), parse_mode=ParseMode.MARKDOWN_V2)
 async def check_inactivity_task():
     while True:
         await asyncio.sleep(INACTIVITY_CHECK_INTERVAL_SECONDS)
