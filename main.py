@@ -36,18 +36,11 @@ dp = Dispatcher()
 DB_NAME = 'bot_data.db'
 
 # --- Вспомогательная функция для экранирования символов MarkdownV2 ---
+# Эта функция теперь включает дефис в список экранируемых символов,
+# что является правильным подходом для универсального экранирования.
 def escape_markdown_v2(text: str) -> str:
     """Экранирует специальные символы для форматирования MarkdownV2."""
-    # Полный список зарезервированных символов для MarkdownV2
-    # Обратите внимание: дефис '-' здесь для экранирования в тексте, а не как маркер списка.
-    # Если '-' используется как маркер списка в начале новой строки, его экранировать не нужно.
-    # Но если он часть текста, как в '07:00-15:00', то нужно.
-    # Поэтому ручное экранирование в таких случаях более надежно.
-    # Оставим функцию общей, а точечные исправления сделаем в строках.
-    escape_chars = r'_*[]()~`>#+=|{}.!' # Дефис убрал из универсального экранирования
-                                        # так как он может быть маркером списка
-                                        # и тогда его экранировать не нужно.
-                                        # Будем экранировать его вручную в проблемных местах.
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
     return "".join(['\\' + char if char in escape_chars else char for char in text])
 
 
@@ -183,7 +176,8 @@ async def update_user_activity_on_message(message: types.Message):
         return
 
     user_id = message.from_user.id
-    user_full_name = message.from_user.full_name or f"Пользователь {user_id}"
+    # Используем user_full_name напрямую, так как он не отправляется в Telegram с Markdown
+    user_full_name = message.from_user.full_name or f"Пользователь {user_id}" 
     current_time_str = datetime.now(TARGET_TIMEZONE).isoformat()
 
     if user_id in notified_inactive_users_cache:
@@ -226,6 +220,7 @@ async def add_to_ignore_list(message: types.Message):
         if target_user_id not in ignored_users_cache:
             add_ignored_user(target_user_id, user_full_name)
             ignored_users_cache[target_user_id] = user_full_name
+            # Теперь escape_markdown_v2 позаботится о дефисах в user_full_name
             await message.reply(f"Пользователь **{escape_markdown_v2(user_full_name)}** \\(ID: `{target_user_id}`\\) добавлен в список игнорируемых\\.",
                                 parse_mode=ParseMode.MARKDOWN_V2)
             print(f"[{datetime.now(TARGET_TIMEZONE).strftime('%H:%M:%S')}] Добавлен в игнор: {user_full_name} ({target_user_id})")
@@ -316,8 +311,7 @@ async def show_top_users(message: types.Message):
 
     response = response_header
     for i, (user_id, user_name, forwarded_count) in enumerate(top_list):
-        # Здесь была потенциальная проблема с дефисом, если он не был экранирован
-        # В данном случае, дефис используется как обычный текст, поэтому экранируем его.
+        # Дефис здесь будет экранирован функцией escape_markdown_v2
         response += f"{i+1}\\. **{escape_markdown_v2(user_name)}** \\(ID: `{user_id}`\\) \\- `{forwarded_count}` сообщений\n"
 
     await message.reply(response, parse_mode=ParseMode.MARKDOWN_V2)
@@ -406,7 +400,7 @@ async def list_users_by_shifts(message: types.Message):
         cursor.execute("SELECT user_id, user_name, shift FROM user_activity ORDER BY user_name")
         for user_id, user_name, shift in cursor.fetchall():
             escaped_user_name = escape_markdown_v2(user_name)
-            # Дефис здесь - это маркер списка Markdown, поэтому его не нужно экранировать.
+            # Дефис здесь - это маркер списка Markdown, его НЕ НУЖНО экранировать.
             if shift == 'morning':
                 morning_users.append(f"- **{escaped_user_name}** \\(`{user_id}`\\)")
             elif shift == 'evening':
@@ -447,7 +441,7 @@ async def check_inactivity_task():
                 message_text = (
                     f"⚠️ Пользователь **{escape_markdown_v2(user_name)}** \\(ID: `{user_id}`\\) из **{user_shift.capitalize()}** смены "
                     f"не проявлял активности более {INACTIVITY_THRESHOLD_MINUTES} минут\\.\n"
-                    f"Последняя активность: `{formatted_last_activity}`"
+                    f"Последняя активность: `{escape_markdown_v2(formatted_last_activity)}`" # Экранируем дату/время тоже
                 )
                 try:
                     await bot.send_message(DESTINATION_CHAT_ID, message_text, parse_mode=ParseMode.MARKDOWN_V2)
