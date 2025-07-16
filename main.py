@@ -342,7 +342,9 @@ async def list_users_by_shifts(message: types.Message):
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, user_name, shift FROM user_activity ORDER BY user_name")
         for user_id, user_name, shift in cursor.fetchall():
-            user_string = f"- *{escape_markdown_v2(user_name)}* \\(`{user_id}`\\)"
+            # IMPROVEMENT: Add a fallback for missing usernames.
+            display_name = user_name or f"Пользователь {user_id}"
+            user_string = f"- *{escape_markdown_v2(display_name)}* \\(`{user_id}`\\)"
             if shift == 'morning': morning_users.append(user_string)
             elif shift == 'evening': evening_users.append(user_string)
             else: unassigned_users.append(user_string)
