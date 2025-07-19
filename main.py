@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from aiogram import Bot, Dispatcher, executor, types
 from dotenv import load_dotenv
 import pytz
@@ -19,88 +19,98 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ZONE_A_CHAT_ID = int(os.getenv("ZONE_A_CHAT_ID"))  # -100123456789
-ZONE_B_CHAT_ID = int(os.getenv("ZONE_B_CHAT_ID"))  # -100987654321
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))    # Для уведомлений
+ZONE_A_CHAT_ID = int(os.getenv("ZONE_A_CHAT_ID"))  # Чат "Отчёты скаутов Е.О.М"
+ZONE_B_CHAT_ID = int(os.getenv("ZONE_B_CHAT_ID"))  # Чат "10 аумақ-зона"
+REPORT_CHAT_ID = -1002853755767  # Группа для уведомлений
 
 # Временные настройки (Алматы UTC+5)
 TIMEZONE = pytz.timezone("Asia/Almaty")
-MORNING_SHIFT = (7, 15)    # с 07:00 до 15:00
-EVENING_SHIFT = (15, 23)   # с 15:00 до 23:00
-CHECK_INTERVAL = 2700       # 45 минут в секундах
+SHIFTS = {
+    'morning': (7, 15),   # Утренняя смена 07:00-15:00
+    'evening': (15, 23)   # Вечерняя смена 15:00-23:00
+}
+CHECK_INTERVAL = 2700      # 45 минут в секундах
+
+# Названия зон
+ZONE_NAMES = {
+    'A': "Отчёты скаутов Е.О.М",
+    'B': "10 аумақ-зона"
+}
 
 # Хранение данных
-zone_a_workers: Dict[int, datetime] = {}  # {user_id: last_report_time}
-zone_b_workers: Dict[int, datetime] = {}
+workers_data: Dict[int, Dict[str, datetime]] = {}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-async def get_active_users(chat_id: int) -> List[int]:
-    """Получаем список участников чата"""
-    try:
-        members = await bot.get_chat_administrators(chat_id)
-        return [member.user.id for member in members if not member.user.is_bot]
-    except Exception as e:
-        logger.error(f"Ошибка получения участников чата {chat_id}: {e}")
-        return []
-
-async def check_reports():
-    """Проверка отчетов по зонам"""
+def get_current_shift() -> Tuple[str, str]:
+    """Определяем текущую смену"""
     now = datetime.now(TIMEZONE)
     current_hour = now.hour
     
-    # Определяем текущую смену
-    if MORNING_SHIFT[0] <= current_hour < MORNING_SHIFT[1]:
-        shift_name = "🌅 Утренняя смена"
-        active_zone = zone_a_workers
-        inactive_zone = zone_b_workers
-        chat_id = ZONE_A_CHAT_ID
-    elif EVENING_SHIFT[0] <= current_hour < EVENING_SHIFT[1]:
-        shift_name = "🌃 Вечерняя смена"
-        active_zone = zone_b_workers
-        inactive_zone = zone_a_workers
-        chat_id = ZONE_B_CHAT_ID
-    else:
-        return  # Нерабочее время
+    shift_name = 'morning' if SHIFTS['morning'][0] <= current_hour < SHIFTS['morning'][1] else 'evening'
+    return shift_name
+
+async def check_reports():
+    """Проверка отчетов по зонам и сменам"""
+    now = datetime.now(TIMEZONE)
+    current_shift = get_current_shift()
     
-    # Получаем текущих участников чата
-    current_members = await get_active_users(chat_id)
-    
-    # Проверяем неактивных
-    inactive_users = []
-    for user_id in current_members:
-        last_report = active_zone.get(user_id)
-        if not last_report or (now - last_report) > timedelta(minutes=45):
-            inactive_users.append(user_id)
-    
-    # Отправляем уведомление
-    if inactive_users:
-        message = f"⚠️ {shift_name} - нет отчетов от:\n"
-        for user_id in inactive_users:
-            try:
-                user = await bot.get_chat(user_id)
-                username = user.username or user.first_name
-                last_report_time = active_zone.get(user_id, "никогда")
-                if isinstance(last_report_time, datetime):
-                    last_report_time = last_report_time.strftime('%H:%M')
-                message += f"• {username} (последний: {last_report_time})\n"
-            except Exception as e:
-                logger.error(f"Ошибка получения данных пользователя {user_id}: {e}")
+    for zone in ['A', 'B']:
+        chat_id = ZONE_A_CHAT_ID if zone == 'A' else ZONE_B_CHAT_ID
         
-        await bot.send_message(chat_id, message)
+        try:
+            members = await bot.get_chat_administrators(chat_id)
+            current_members = [m.user.id for m in members if not m.user.is_bot]
+        except Exception as e:
+            logger.error(f"Ошибка получения участников чата {zone}: {e}")
+            continue
+        
+        inactive_users = []
+        for user_id in current_members:
+            user_data = workers_data.get(user_id, {})
+            
+            if user_data.get('zone') == zone and user_data.get('shift') == current_shift:
+                last_report = user_data.get('last_report')
+                if not last_report or (now - last_report) > timedelta(minutes=45):
+                    inactive_users.append(user_id)
+        
+        if inactive_users:
+            message = (
+                f"⚠️ <b>{ZONE_NAMES[zone]} ({current_shift.capitalize()} смена)</b>\n"
+                f"Нет отчетов от:\n\n"
+            )
+            
+            for user_id in inactive_users:
+                try:
+                    user = await bot.get_chat(user_id)
+                    username = user.username or user.first_name
+                    last_time = workers_data.get(user_id, {}).get('last_report', 'никогда')
+                    if isinstance(last_time, datetime):
+                        last_time = last_time.strftime('%d.%m %H:%M')
+                    message += f"▪️ {username} (последний: {last_time})\n"
+                except Exception as e:
+                    logger.error(f"Ошибка получения данных пользователя {user_id}: {e}")
+            
+            await bot.send_message(REPORT_CHAT_ID, message, parse_mode='HTML')
 
 @dp.message_handler(content_types=['photo'])
 async def handle_photo(message: types.Message):
     """Фиксация фото-отчетов"""
     user_id = message.from_user.id
     chat_id = message.chat.id
-    now = datetime.now(TIMEZONE)
     
-    if chat_id == ZONE_A_CHAT_ID:
-        zone_a_workers[user_id] = now
-    elif chat_id == ZONE_B_CHAT_ID:
-        zone_b_workers[user_id] = now
+    if chat_id not in [ZONE_A_CHAT_ID, ZONE_B_CHAT_ID]:
+        return
+    
+    zone = 'A' if chat_id == ZONE_A_CHAT_ID else 'B'
+    current_shift = get_current_shift()
+    
+    workers_data[user_id] = {
+        'zone': zone,
+        'shift': current_shift,
+        'last_report': datetime.now(TIMEZONE)
+    }
 
 async def scheduler():
     """Планировщик проверок"""
@@ -111,7 +121,7 @@ async def scheduler():
 async def on_startup(dp):
     """Запуск при старте"""
     asyncio.create_task(scheduler())
-    await bot.send_message(ADMIN_CHAT_ID, "🔍 Бот начал мониторинг отчетов")
+    await bot.send_message(REPORT_CHAT_ID, "🟢 Бот мониторинга отчетов активирован")
 
 if __name__ == "__main__":
     executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
