@@ -1,23 +1,20 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from typing import Dict, List
+from aiogram import Bot, Dispatcher, executor, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
 from dotenv import load_dotenv
 import pytz
-from enum import Enum
 
 # Загрузка конфигурации
 load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -36,38 +33,44 @@ EVENING_SHIFT_END = int(os.getenv("EVENING_SHIFT_END_HOUR"))
 
 TIMEZONE = pytz.timezone("Europe/Moscow")
 
-# Глобальные переменные для хранения данных
-workers_data: Dict[int, Dict[str, datetime]] = {}  # {user_id: {"last_report": datetime, "zone": str}}
-workers_zones: Dict[int, str] = {}  # {user_id: "zone_a" или "zone_b"}
-workers_days_off: Dict[int, List[str]] = {}  # {user_id: ["2024-05-20", "2024-05-21"]}
-
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
-# Состояния для FSM
-class AdminStates(StatesGroup):
-    waiting_for_day_off = State()
+# Глобальные переменные для хранения данных
+workers_data: Dict[int, Dict[str, datetime]] = {}
+workers_zones: Dict[int, str] = {}
+workers_days_off: Dict[int, List[str]] = {}
 
-# Кнопки для админа
+# Клавиатура для админа
 def get_admin_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Отчет за неделю", callback_data="week_report")
-    builder.button(text="➕ Добавить выходной", callback_data="add_day_off")
-    builder.adjust(1)
-    return builder.as_markup()
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton(
+        text="📊 Отчет за неделю",
+        callback_data="week_report"
+    ))
+    keyboard.add(types.InlineKeyboardButton(
+        text="➕ Добавить выходной",
+        callback_data="add_day_off"
+    ))
+    return keyboard
 
 # Обработчик команды /start
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
         await message.answer("👑 Панель админа", reply_markup=get_admin_keyboard())
     else:
         await message.answer("📋 Отправляйте фото с подписью 'Зона А' или 'Зона Б'")
 
 # Обработчик сообщений с фото
-@dp.message(F.photo & F.chat.id.in_(SOURCE_CHAT_IDS) & ~F.from_user.id.in_(ADMIN_IDS))
-async def handle_photo_with_zone(message: Message):
+@dp.message_handler(
+    lambda message: message.photo and 
+    message.chat.id in SOURCE_CHAT_IDS and 
+    message.from_user.id not in ADMIN_IDS
+)
+async def handle_photo_with_zone(message: types.Message):
     user = message.from_user
     caption = message.caption or ""
     
@@ -90,87 +93,100 @@ async def handle_photo_with_zone(message: Message):
     await message.reply(f"✅ Отчет принят! Зона: {zone.split('_')[1].upper()}")
 
 # Обработчик кнопки "Отчет за неделю"
-@dp.callback_query(F.data == "week_report")
-async def week_report_handler(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Доступ запрещен")
+@dp.callback_query_handler(lambda c: c.data == "week_report")
+async def week_report_handler(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id not in ADMIN_IDS:
+        await callback_query.answer("🚫 Доступ запрещен")
         return
     
     today = datetime.now(TIMEZONE)
     week_ago = today - timedelta(days=7)
     
-    report = "📅 <b>Отчет за неделю</b> ({} - {})\n\n".format(
-        week_ago.strftime("%d.%m"), 
-        today.strftime("%d.%m")
-    )
+    report = f"📅 <b>Отчет за неделю</b> ({week_ago.strftime('%d.%m')} - {today.strftime('%d.%m')})\n\n"
     
-    # Собираем данные по рабочим
-    workers_info = {}
     for user_id, zone in workers_zones.items():
         try:
             user = await bot.get_chat(user_id)
             username = user.username or user.full_name
             days_off = workers_days_off.get(user_id, [])
             
-            workers_info[username] = {
-                "zone": zone.split("_")[1].upper(),
-                "days_off": len(days_off),
-                "last_report": workers_data[user_id]["last_report"].strftime("%d.%m %H:%M")
-            }
+            report += (
+                f"👤 <b>{username}</b>\n"
+                f"📍 Зона: {zone.split('_')[1].upper()}\n"
+                f"📅 Последний отчет: {workers_data[user_id]['last_report'].strftime('%d.%m %H:%M')}\n"
+                f"🏖 Выходных: {len(days_off)}\n\n"
+            )
         except Exception as e:
             logger.error(f"Ошибка при получении данных пользователя {user_id}: {e}")
     
-    # Формируем отчет
-    for username, data in workers_info.items():
-        report += (
-            f"👤 <b>{username}</b>\n"
-            f"📍 Зона: {data['zone']}\n"
-            f"📅 Последний отчет: {data['last_report']}\n"
-            f"🏖 Выходных: {data['days_off']}\n\n"
-        )
-    
-    await callback.message.edit_text(report, parse_mode="HTML")
+    await callback_query.message.edit_text(report, parse_mode="HTML")
+
+# Состояния для FSM
+class AdminStates(StatesGroup):
+    waiting_for_worker = State()
+    waiting_for_date = State()
 
 # Обработчик кнопки "Добавить выходной"
-@dp.callback_query(F.data == "add_day_off")
-async def add_day_off_handler(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Доступ запрещен")
+@dp.callback_query_handler(lambda c: c.data == "add_day_off", state="*")
+async def add_day_off_handler(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id not in ADMIN_IDS:
+        await callback_query.answer("🚫 Доступ запрещен")
         return
     
-    # Получаем список рабочих для выбора
-    builder = InlineKeyboardBuilder()
+    keyboard = types.InlineKeyboardMarkup()
     for user_id in workers_zones.keys():
         try:
             user = await bot.get_chat(user_id)
-            builder.button(text=user.full_name, callback_data=f"day_off_{user_id}")
+            keyboard.add(types.InlineKeyboardButton(
+                text=user.full_name,
+                callback_data=f"select_worker_{user_id}"
+            ))
         except:
             continue
     
-    builder.adjust(2)
-    await callback.message.edit_text(
+    await callback_query.message.edit_text(
         "Выберите рабочего для добавления выходного:",
-        reply_markup=builder.as_markup()
+        reply_markup=keyboard
     )
-    await state.set_state(AdminStates.waiting_for_day_off)
+    await AdminStates.waiting_for_worker.set()
 
-# Обработчик выбора рабочего для выходного
-@dp.callback_query(F.data.startswith("day_off_"), AdminStates.waiting_for_day_off)
-async def select_worker_for_day_off(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split("_")[2])
-    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+# Обработчик выбора рабочего
+@dp.callback_query_handler(lambda c: c.data.startswith("select_worker_"), state=AdminStates.waiting_for_worker)
+async def select_worker_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = int(callback_query.data.split("_")[2])
+    await state.update_data(worker_id=user_id)
     
-    if user_id not in workers_days_off:
-        workers_days_off[user_id] = []
+    await callback_query.message.edit_text(
+        "Введите дату выходного в формате ДД.ММ (например, 15.05):"
+    )
+    await AdminStates.waiting_for_date.set()
+
+# Обработчик ввода даты
+@dp.message_handler(state=AdminStates.waiting_for_date)
+async def process_date(message: types.Message, state: FSMContext):
+    try:
+        day, month = map(int, message.text.split('.'))
+        year = datetime.now().year
+        date_obj = datetime(year, month, day)
+        date_str = date_obj.strftime("%Y-%m-%d")
+        
+        data = await state.get_data()
+        user_id = data['worker_id']
+        
+        if user_id not in workers_days_off:
+            workers_days_off[user_id] = []
+        
+        if date_str not in workers_days_off[user_id]:
+            workers_days_off[user_id].append(date_str)
+            await message.answer(f"✅ Выходной на {message.text} добавлен")
+        else:
+            await message.answer("⚠️ Уже есть выходной на эту дату")
+        
+    except Exception as e:
+        await message.answer("❌ Неверный формат даты. Используйте ДД.ММ")
+        return
     
-    if today not in workers_days_off[user_id]:
-        workers_days_off[user_id].append(today)
-        await callback.answer("✅ Выходной добавлен")
-    else:
-        await callback.answer("⚠️ Уже есть выходной на сегодня")
-    
-    await state.clear()
-    await callback.message.delete()
+    await state.finish()
 
 # Проверка неактивности
 async def check_inactivity():
@@ -187,7 +203,6 @@ async def check_inactivity():
     inactive_workers = []
     
     for user_id, data in workers_data.items():
-        # Проверяем, не выходной ли сегодня у рабочего
         today_str = now.strftime("%Y-%m-%d")
         if user_id in workers_days_off and today_str in workers_days_off[user_id]:
             continue
@@ -215,17 +230,17 @@ async def check_inactivity():
             parse_mode="HTML"
         )
 
-# Запуск бота
-async def on_startup():
-    from aiogram.utils import executor
-    scheduler = executor.start(dp)
-    scheduler.add_job(
-        check_inactivity,
-        "interval",
-        seconds=CHECK_INTERVAL,
-        timezone=TIMEZONE
-    )
+# Запуск периодической проверки
+async def on_startup(dp):
+    from aiogram import executor
+    import asyncio
+    
+    async def periodic_check():
+        while True:
+            await check_inactivity()
+            await asyncio.sleep(CHECK_INTERVAL)
+    
+    asyncio.create_task(periodic_check())
 
 if __name__ == "__main__":
-    from aiogram import executor
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
