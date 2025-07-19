@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ZONE_A_CHAT_ID = int(os.getenv("ZONE_A_CHAT_ID"))  # Чат "Отчёты скаутов Е.О.М"
 ZONE_B_CHAT_ID = int(os.getenv("ZONE_B_CHAT_ID"))  # Чат "10 аумақ-зона"
-REPORT_CHAT_ID = -1002853755767  # Группа для уведомлений
+REPORT_CHAT_ID = int(os.getenv("REPORT_CHAT_ID"))  # Группа для уведомлений (-1002853755767)
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))    # Чат для уведомлений админам
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS").split(",")))  # ID админов через запятую
 
 # Временные настройки (Алматы UTC+5)
 TIMEZONE = pytz.timezone("Asia/Almaty")
@@ -61,9 +63,10 @@ async def check_reports():
         
         try:
             members = await bot.get_chat_administrators(chat_id)
-            current_members = [m.user.id for m in members if not m.user.is_bot]
+            current_members = [m.user.id for m in members if not m.user.is_bot and m.user.id not in ADMIN_IDS]
         except Exception as e:
             logger.error(f"Ошибка получения участников чата {zone}: {e}")
+            await notify_admins(f"Ошибка доступа к чату {ZONE_NAMES[zone]}")
             continue
         
         inactive_users = []
@@ -93,6 +96,15 @@ async def check_reports():
                     logger.error(f"Ошибка получения данных пользователя {user_id}: {e}")
             
             await bot.send_message(REPORT_CHAT_ID, message, parse_mode='HTML')
+            await notify_admins(f"Обнаружены пропущенные отчеты в {ZONE_NAMES[zone]}")
+
+async def notify_admins(message: str):
+    """Уведомление админов"""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, message)
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
 
 @dp.message_handler(content_types=['photo'])
 async def handle_photo(message: types.Message):
@@ -100,7 +112,7 @@ async def handle_photo(message: types.Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    if chat_id not in [ZONE_A_CHAT_ID, ZONE_B_CHAT_ID]:
+    if chat_id not in [ZONE_A_CHAT_ID, ZONE_B_CHAT_ID] or user_id in ADMIN_IDS:
         return
     
     zone = 'A' if chat_id == ZONE_A_CHAT_ID else 'B'
@@ -121,7 +133,8 @@ async def scheduler():
 async def on_startup(dp):
     """Запуск при старте"""
     asyncio.create_task(scheduler())
-    await bot.send_message(REPORT_CHAT_ID, "🟢 Бот мониторинга отчетов активирован")
+    await bot.send_message(ADMIN_CHAT_ID, "🟢 Бот мониторинга отчетов активирован")
+    await notify_admins("Бот успешно запущен")
 
 if __name__ == "__main__":
     executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
