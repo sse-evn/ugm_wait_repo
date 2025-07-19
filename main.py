@@ -1,167 +1,124 @@
-import os
-import logging
-import sys
 import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
-from typing import Dict, List
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from dotenv import load_dotenv
-import pytz
-import fcntl
+from config import config
+from database import db
+from monitoring import ShiftChecker
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Инициализация бота
+bot = Bot(token=config.BOT_TOKEN)
+dp = Dispatcher(bot)
 
-load_dotenv()
-
-required_vars = [
-    'BOT_TOKEN',
-    'ZONE_A_CHAT_ID',
-    'ZONE_B_CHAT_ID',
-    'REPORT_CHAT_ID',
-    'ADMIN_IDS'
-]
-
-for var in required_vars:
-    if not os.getenv(var):
-        logger.error(f'❌ Отсутствует переменная: {var}')
-        exit(1)
-
-config = {
-    'BOT_TOKEN': os.getenv('BOT_TOKEN'),
-    'ZONE_A_CHAT_ID': int(os.getenv('ZONE_A_CHAT_ID')),
-    'ZONE_B_CHAT_ID': int(os.getenv('ZONE_B_CHAT_ID')),
-    'REPORT_CHAT_ID': int(os.getenv('REPORT_CHAT_ID')),
-    'ADMIN_IDS': list(map(int, os.getenv('ADMIN_IDS').split(','))),
-    'TIMEZONE': pytz.timezone(os.getenv('TIMEZONE', 'Asia/Almaty')),
-    'CHECK_INTERVAL': int(os.getenv('CHECK_INTERVAL', '5')),
-    'INACTIVITY_THRESHOLD': int(os.getenv('INACTIVITY_THRESHOLD', '30')),
-    'MORNING_SHIFT': (int(os.getenv('MORNING_SHIFT_START', '7')), int(os.getenv('MORNING_SHIFT_END', '15'))),
-    'EVENING_SHIFT': (int(os.getenv('EVENING_SHIFT_START', '15')), int(os.getenv('EVENING_SHIFT_END', '23'))),
-    'ZONE_NAMES': {
-        'A': os.getenv('ZONE_A_NAME', 'Отчёты скаутов Е.О.М'),
-        'B': os.getenv('ZONE_B_NAME', '10 аумақ-зона')
-    }
-}
-
-def acquire_lock():
-    lock_file = 'bot.lock'
-    try:
-        fd = os.open(lock_file, os.O_CREAT | os.O_WRONLY)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except (IOError, OSError):
-        logger.error('❌ Бот уже запущен! Завершаю работу.')
-        sys.exit(1)
-
-try:
-    bot = Bot(token=config['BOT_TOKEN'])
-    storage = MemoryStorage()
-    dp = Dispatcher(bot, storage=storage)
-    logger.info("🤖 Бот инициализирован")
-except Exception as e:
-    logger.error(f"❌ Ошибка инициализации бота: {e}")
-    exit(1)
-
-user_last_reports = {}
-
-def get_current_shift() -> str:
-    now = datetime.now(config['TIMEZONE']).hour
-    if config['MORNING_SHIFT'][0] <= now < config['MORNING_SHIFT'][1]:
-        return 'morning'
-    elif config['EVENING_SHIFT'][0] <= now < config['EVENING_SHIFT'][1]:
-        return 'evening'
-    return None
-
-async def get_chat_members(chat_id: int) -> List[int]:
-    try:
-        members = await bot.get_chat_administrators(chat_id)
-        return [m.user.id for m in members if not m.user.is_bot and m.user.id not in config['ADMIN_IDS']]
-    except Exception as e:
-        logger.error(f'Ошибка получения участников чата {chat_id}: {e}')
-        return []
-
-async def check_reports():
-    current_shift = get_current_shift()
-    if not current_shift:
-        return
-
-    now = datetime.now(config['TIMEZONE'])
+async def get_afk_report(minutes_threshold=45):
+    """Генерирует отчет о AFK пользователях"""
+    afk_users = db.get_afk_users(minutes_threshold)
+    if not afk_users:
+        return "Сейчас все сотрудники активны!"
     
-    for zone in ['A', 'B']:
-        chat_id = config[f'ZONE_{zone}_CHAT_ID']
-        current_members = await get_chat_members(chat_id)
+    report = []
+    for user_id, username, last_active in afk_users:
+        last_active_dt = datetime.strptime(last_active, "%Y-%m-%d %H:%M:%S")
+        afk_duration = datetime.now(config.TIMEZONE) - last_active_dt
+        hours, remainder = divmod(afk_duration.seconds, 3600)
+        minutes = remainder // 60
         
-        inactive_users = []
-        for user_id in current_members:
-            last_report = user_last_reports.get(user_id)
-            if not last_report or (now - last_report).total_seconds() > config['INACTIVITY_THRESHOLD']:
-                inactive_users.append(user_id)
-
-        if inactive_users:
-            message = f"⚠️ <b>{config['ZONE_NAMES'][zone]} ({current_shift} смена)</b>\n"
-            message += f"Нет отчетов более {config['INACTIVITY_THRESHOLD']} сек от:\n\n"
-            
-            for user_id in inactive_users:
-                try:
-                    user = await bot.get_chat(user_id)
-                    username = user.username or user.first_name
-                    last_time = user_last_reports.get(user_id)
-                    last_time_str = last_time.strftime('%H:%M:%S') if last_time else "никогда"
-                    message += f"• {username} (последний: {last_time_str})\n"
-                except:
-                    continue
-            
-            try:
-                await bot.send_message(config['REPORT_CHAT_ID'], message, parse_mode='HTML')
-            except:
-                pass
-
-@dp.message_handler(content_types=['photo'])
-async def handle_photo(message: types.Message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
+        duration_str = f"{hours}ч {minutes}м" if hours else f"{minutes}м"
+        report.append(f"👤 @{username} - AFK {duration_str} (с {last_active_dt.strftime('%H:%M')})")
     
-    if chat_id not in [config['ZONE_A_CHAT_ID'], config['ZONE_B_CHAT_ID']] or user_id in config['ADMIN_IDS']:
+    shift_name = ShiftChecker.current_shift_name()
+    return (
+        f"📊 Отчет по AFK ({shift_name} смена, Алматы):\n"
+        f"Порог: {minutes_threshold} минут\n\n" +
+        "\n".join(report)
+)
+
+@dp.message_handler(Command("afk_report"))
+async def send_afk_report(message: types.Message):
+    """Отправляет текущий отчет по AFK"""
+    if not db.is_admin(message.from_user.id):
         return
-
-    user_last_reports[user_id] = datetime.now(config['TIMEZONE'])
-    logger.info(f'Принят отчет от {user_id}')
-
-async def scheduler():
-    while True:
-        await check_reports()
-        await asyncio.sleep(config['CHECK_INTERVAL'])
-
-async def on_startup(_):
-    asyncio.create_task(scheduler())
-    try:
-        await bot.send_message(config['ADMIN_IDS'][0], '🤖 Бот запущен и начал мониторинг')
-    except:
-        pass
-
-if __name__ == '__main__':
-    lock_fd = acquire_lock()
     
+    # Можно указать кастомный порог: /afk_report 30
     try:
-        executor.start_polling(
-            dp,
-            on_startup=on_startup,
-            skip_updates=True,
-            timeout=60,
-            relax=1
-        )
-    except Exception as e:
-        logger.error(f'Фатальная ошибка: {e}')
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-        try:
-            os.remove('bot.lock')
-        except:
-            pass
-        logger.info('Бот завершил работу')
+        threshold = int(message.get_args()) if message.get_args() else 45
+    except ValueError:
+        threshold = 45
+    
+    report = await get_afk_report(threshold)
+    await message.reply(report)
+
+@dp.message_handler(Command("user_status"))
+async def user_status(message: types.Message):
+    """Показывает статус конкретного пользователя"""
+    if not db.is_admin(message.from_user.id):
+        return
+    
+    # Формат: /user_status @username
+    username = message.get_args().strip("@") if message.get_args() else None
+    if not username:
+        await message.reply("Укажите username: /user_status @username")
+        return
+    
+    user_data = db.get_user_by_username(username)
+    if not user_data:
+        await message.reply(f"Пользователь @{username} не найден")
+        return
+    
+    user_id, username, last_active, is_ignored = user_data
+    if is_ignored:
+        await message.reply(f"👤 @{username} - в игнор-листе")
+        return
+    
+    if not last_active:
+        await message.reply(f"👤 @{username} - нет данных о активности")
+        return
+    
+    last_active_dt = datetime.strptime(last_active, "%Y-%m-%d %H:%M:%S")
+    afk_duration = datetime.now(config.TIMEZONE) - last_active_dt
+    
+    hours, remainder = divmod(afk_duration.seconds, 3600)
+    minutes = remainder // 60
+    duration_str = f"{hours}ч {minutes}м" if hours else f"{minutes}м"
+    
+    status = "🟢 Активен" if minutes < 45 else "🔴 AFK"
+    await message.reply(
+        f"👤 @{username}\n"
+        f"🕒 Последняя активность: {last_active_dt.strftime('%H:%M')}\n"
+        f"⏱ Время AFK: {duration_str}\n"
+        f"📊 Статус: {status}"
+    )
+
+async def afk_checker():
+    """Фоновая задача для проверки AFK"""
+    while True:
+        if ShiftChecker.is_working_time():
+            afk_users = db.get_afk_users(45)
+            if afk_users:
+                report = await get_afk_report()
+                await bot.send_message(config.ADMIN_CHAT_ID, report)
+        
+        await asyncio.sleep(60)  # Проверка каждую минуту
+
+async def on_startup(dp):
+    """Действия при запуске бота"""
+    print(f"Бот запущен | Таймзона: {config.TIMEZONE}")
+    print(f"Смены: утренняя {config.WORK_SHIFTS[0][0].strftime('%H:%M')}-{config.WORK_SHIFTS[0][1].strftime('%H:%M')}, "
+          f"вечерняя {config.WORK_SHIFTS[1][0].strftime('%H:%M')}-{config.WORK_SHIFTS[1][1].strftime('%H:%M')}")
+    
+    # Запуск фоновой задачи
+    asyncio.create_task(afk_checker())
+
+if __name__ == "__main__":
+    from monitoring import handle_message
+    
+    # Регистрация обработчиков
+    dp.register_message_handler(
+        handle_message,
+        chat_id=config.MONITOR_CHAT_ID,
+        content_types=[types.ContentType.PHOTO, types.ContentType.TEXT]
+    )
+    
+    executor.start_polling(dp, on_startup=on_startup)
