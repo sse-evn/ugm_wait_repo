@@ -1,58 +1,71 @@
 import os
 import logging
+import sys
+import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from dotenv import load_dotenv
 import pytz
-import asyncio
+import fcntl
 
-# 1. Настройка логирования (добавим больше деталей)
+# Настройка логирования
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG  # Изменим на DEBUG для подробных логов
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 2. Загрузка конфигурации с проверкой
+# Загрузка конфигурации
 load_dotenv()
+
+# Проверка обязательных переменных
 required_vars = [
-    "BOT_TOKEN",
-    "ZONE_A_CHAT_ID",
-    "ZONE_B_CHAT_ID",
-    "REPORT_CHAT_ID",
-    "ADMIN_IDS"
+    'BOT_TOKEN',
+    'ZONE_A_CHAT_ID',
+    'ZONE_B_CHAT_ID',
+    'REPORT_CHAT_ID',
+    'ADMIN_IDS'
 ]
 
 for var in required_vars:
     if not os.getenv(var):
-        logger.error(f"❌ Отсутствует обязательная переменная: {var}")
+        logger.error(f'❌ Отсутствует переменная: {var}')
         exit(1)
 
-# 3. Конфигурация с дефолтными значениями
+# Конфигурация
 config = {
-    "BOT_TOKEN": os.getenv("BOT_TOKEN"),
-    "ZONE_A_CHAT_ID": int(os.getenv("ZONE_A_CHAT_ID")),
-    "ZONE_B_CHAT_ID": int(os.getenv("ZONE_B_CHAT_ID")),
-    "REPORT_CHAT_ID": int(os.getenv("REPORT_CHAT_ID")),
-    "ADMIN_IDS": list(map(int, os.getenv("ADMIN_IDS").split(","))),
-    "TIMEZONE": pytz.timezone(os.getenv("TIMEZONE", "Asia/Almaty")),
-    "CHECK_INTERVAL": int(os.getenv("CHECK_INTERVAL", "5")),
-    "INACTIVITY_THRESHOLD": int(os.getenv("INACTIVITY_THRESHOLD", "30")),
-    "MORNING_SHIFT": (int(os.getenv("MORNING_SHIFT_START", "7")), int(os.getenv("MORNING_SHIFT_END", "15"))),
-    "EVENING_SHIFT": (int(os.getenv("EVENING_SHIFT_START", "15")), int(os.getenv("EVENING_SHIFT_END", "23"))),
-    "ZONE_NAMES": {
-        'A': os.getenv("ZONE_A_NAME", "Отчёты скаутов Е.О.М"),
-        'B': os.getenv("ZONE_B_NAME", "10 аумақ-зона")
+    'BOT_TOKEN': os.getenv('BOT_TOKEN'),
+    'ZONE_A_CHAT_ID': int(os.getenv('ZONE_A_CHAT_ID')),
+    'ZONE_B_CHAT_ID': int(os.getenv('ZONE_B_CHAT_ID')),
+    'REPORT_CHAT_ID': int(os.getenv('REPORT_CHAT_ID')),
+    'ADMIN_IDS': list(map(int, os.getenv('ADMIN_IDS').split(','))),
+    'TIMEZONE': pytz.timezone(os.getenv('TIMEZONE', 'Asia/Almaty')),
+    'CHECK_INTERVAL': int(os.getenv('CHECK_INTERVAL', '5')),
+    'INACTIVITY_THRESHOLD': int(os.getenv('INACTIVITY_THRESHOLD', '30')),
+    'MORNING_SHIFT': (int(os.getenv('MORNING_SHIFT_START', '7')), int(os.getenv('MORNING_SHIFT_END', '15'))),
+    'EVENING_SHIFT': (int(os.getenv('EVENING_SHIFT_START', '15')), int(os.getenv('EVENING_SHIFT_END', '23'))),
+    'ZONE_NAMES': {
+        'A': os.getenv('ZONE_A_NAME', 'Отчёты скаутов Е.О.М'),
+        'B': os.getenv('ZONE_B_NAME', '10 аумақ-зона')
     }
 }
 
-logger.info("✅ Конфигурация загружена успешно")
+# Блокировка файла для предотвращения множественных запусков
+def acquire_lock():
+    lock_file = 'bot.lock'
+    try:
+        fd = os.open(lock_file, os.O_CREAT | os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (IOError, OSError):
+        logger.error('❌ Бот уже запущен! Завершаю работу.')
+        sys.exit(1)
 
-# 4. Инициализация бота с обработкой ошибок
+# Инициализация бота
 try:
-    bot = Bot(token=config["BOT_TOKEN"])
+    bot = Bot(token=config['BOT_TOKEN'])
     storage = MemoryStorage()
     dp = Dispatcher(bot, storage=storage)
     logger.info("🤖 Бот инициализирован")
@@ -60,151 +73,114 @@ except Exception as e:
     logger.error(f"❌ Ошибка инициализации бота: {e}")
     exit(1)
 
-# 5. Хранение данных (с защитой от конкурентного доступа)
-class WorkerData:
-    def __init__(self):
-        self.data: Dict[int, Dict[str, datetime]] = {}
-        self.lock = asyncio.Lock()
+# Хранение данных
+workers_data: Dict[int, Dict[str, datetime]] = {}
 
-    async def update(self, user_id: int, zone: str, shift: str):
-        async with self.lock:
-            self.data[user_id] = {
-                'zone': zone,
-                'shift': shift,
-                'last_report': datetime.now(config["TIMEZONE"])
-            }
-
-    async def get_inactive(self, zone: str, shift: str, threshold: int) -> List[int]:
-        async with self.lock:
-            now = datetime.now(config["TIMEZONE"])
-            return [
-                user_id for user_id, data in self.data.items()
-                if data['zone'] == zone and data['shift'] == shift and
-                (now - data['last_report']).total_seconds() > threshold
-            ]
-
-workers_data = WorkerData()
-
-# 6. Определение текущей смены с логированием
 def get_current_shift() -> Optional[str]:
-    now = datetime.now(config["TIMEZONE"])
-    current_hour = now.hour
-    logger.debug(f"Текущее время: {now} (час: {current_hour})")
-
-    if config["MORNING_SHIFT"][0] <= current_hour < config["MORNING_SHIFT"][1]:
-        logger.debug("Активна утренняя смена")
+    now = datetime.now(config['TIMEZONE']).hour
+    if config['MORNING_SHIFT'][0] <= now < config['MORNING_SHIFT'][1]:
         return 'morning'
-    elif config["EVENING_SHIFT"][0] <= current_hour < config["EVENING_SHIFT"][1]:
-        logger.debug("Активна вечерняя смена")
+    elif config['EVENING_SHIFT'][0] <= now < config['EVENING_SHIFT'][1]:
         return 'evening'
-    
-    logger.debug("Сейчас нерабочее время")
     return None
 
-# 7. Улучшенная проверка отчетов
 async def check_reports():
-    logger.info("🔍 Начало проверки отчетов")
-    
     current_shift = get_current_shift()
     if not current_shift:
         return
 
+    now = datetime.now(config['TIMEZONE'])
+    
     for zone in ['A', 'B']:
-        chat_id = config[f"ZONE_{zone}_CHAT_ID"]
-        zone_name = config["ZONE_NAMES"][zone]
+        chat_id = config[f'ZONE_{zone}_CHAT_ID']
         
         try:
             members = await bot.get_chat_administrators(chat_id)
-            current_members = [
-                m.user.id for m in members 
-                if not m.user.is_bot and m.user.id not in config["ADMIN_IDS"]
-            ]
-            logger.debug(f"В чате {zone_name} найдено {len(current_members)} рабочих")
+            current_members = [m.user.id for m in members if not m.user.is_bot and m.user.id not in config['ADMIN_IDS']]
         except Exception as e:
-            logger.error(f"Ошибка доступа к чату {zone_name}: {e}")
-            await notify_admins(f"🚨 Ошибка доступа к чату {zone_name}")
+            logger.error(f'Ошибка доступа к чату {zone}: {e}')
             continue
 
-        inactive_users = await workers_data.get_inactive(
-            zone, current_shift, config["INACTIVITY_THRESHOLD"]
-        )
+        inactive_users = []
+        for user_id in current_members:
+            user_data = workers_data.get(user_id, {})
+            if user_data.get('zone') == zone and user_data.get('shift') == current_shift:
+                last_report = user_data.get('last_report')
+                if not last_report or (now - last_report).total_seconds() > config['INACTIVITY_THRESHOLD']:
+                    inactive_users.append(user_id)
 
         if inactive_users:
-            message = (
-                f"⚠️ <b>{zone_name} ({current_shift} смена)</b>\n"
-                f"Нет отчетов более {config['INACTIVITY_THRESHOLD']} сек от:\n\n"
-            )
-            
+            message = f"⚠️ <b>{config['ZONE_NAMES'][zone]} ({current_shift} смена)</b>\nНет отчетов:\n"
             for user_id in inactive_users:
                 try:
                     user = await bot.get_chat(user_id)
                     username = user.username or user.first_name
-                    message += f"• {username}\n"
-                except Exception as e:
-                    logger.error(f"Ошибка получения данных пользователя {user_id}: {e}")
+                    last_time = workers_data.get(user_id, {}).get('last_report', 'никогда')
+                    if isinstance(last_time, datetime):
+                        last_time = last_time.strftime('%H:%M:%S')
+                    message += f"• {username} (последний: {last_time})\n"
+                except:
+                    continue
             
-            await bot.send_message(config["REPORT_CHAT_ID"], message, parse_mode='HTML')
-            logger.info(f"Отправлено уведомление о {len(inactive_users)} неактивных пользователях в {zone_name}")
-
-# 8. Уведомление админов с повторными попытками
-async def notify_admins(message: str, max_retries: int = 3):
-    for admin_id in config["ADMIN_IDS"]:
-        for attempt in range(max_retries):
             try:
-                await bot.send_message(admin_id, message)
-                logger.debug(f"Уведомление отправлено админу {admin_id}")
-                break
+                await bot.send_message(config['REPORT_CHAT_ID'], message, parse_mode='HTML')
             except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
-                await asyncio.sleep(1)
+                logger.error(f'Ошибка отправки сообщения: {e}')
 
-# 9. Обработчик фото с улучшенной валидацией
-@dp.message_handler(content_types=types.ContentType.PHOTO)
+@dp.message_handler(content_types=['photo'])
 async def handle_photo(message: types.Message):
-    try:
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-        
-        if chat_id not in [config["ZONE_A_CHAT_ID"], config["ZONE_B_CHAT_ID"]]:
-            logger.debug(f"Фото из нерелевантного чата {chat_id}")
-            return
-            
-        if user_id in config["ADMIN_IDS"]:
-            logger.debug(f"Фото от админа {user_id}")
-            return
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    if chat_id not in [config['ZONE_A_CHAT_ID'], config['ZONE_B_CHAT_ID']] or user_id in config['ADMIN_IDS']:
+        return
 
-        zone = 'A' if chat_id == config["ZONE_A_CHAT_ID"] else 'B'
-        current_shift = get_current_shift()
-        
-        if current_shift:
-            await workers_data.update(user_id, zone, current_shift)
-            logger.info(f"Зарегистрирован отчет от {user_id} в {zone} ({current_shift})")
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото: {e}")
+    zone = 'A' if chat_id == config['ZONE_A_CHAT_ID'] else 'B'
+    current_shift = get_current_shift()
+    
+    if current_shift:
+        workers_data[user_id] = {
+            'zone': zone,
+            'shift': current_shift,
+            'last_report': datetime.now(config['TIMEZONE'])
+        }
+        logger.info(f'Принят отчет от {user_id} в {zone}')
 
-# 10. Запуск планировщика с обработкой ошибок
 async def scheduler():
     while True:
         try:
             await check_reports()
+            await asyncio.sleep(config['CHECK_INTERVAL'])
         except Exception as e:
-            logger.error(f"Ошибка в планировщике: {e}")
-            await notify_admins(f"🔥 Критическая ошибка в планировщике: {str(e)}")
-        await asyncio.sleep(config["CHECK_INTERVAL"])
+            logger.error(f'Ошибка в планировщике: {e}')
+            await asyncio.sleep(10)
 
-# 11. Запуск бота с обработкой ошибок
-async def on_startup(dp):
+async def on_startup(_):
+    asyncio.create_task(scheduler())
     try:
-        asyncio.create_task(scheduler())
-        await notify_admins("🤖 Бот успешно запущен!")
-        logger.info("Бот запущен и готов к работе")
+        await bot.send_message(config['ADMIN_IDS'][0], '🤖 Бот запущен и начал мониторинг')
     except Exception as e:
-        logger.error(f"Ошибка при запуске: {e}")
-        exit(1)
+        logger.error(f'Не удалось отправить уведомление админу: {e}')
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    lock_fd = acquire_lock()  # Получаем блокировку
+    
     try:
-        executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+        executor.start_polling(
+            dp,
+            on_startup=on_startup,
+            skip_updates=True,
+            timeout=60,  # Увеличиваем таймаут
+            relax=1  # Задержка между запросами
+        )
     except Exception as e:
-        logger.error(f"Фатальная ошибка: {e}")
+        logger.error(f'Фатальная ошибка: {e}')
+    finally:
+        # Освобождаем блокировку при завершении
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+        try:
+            os.remove('bot.lock')
+        except:
+            pass
+        logger.info('Бот завершил работу')
