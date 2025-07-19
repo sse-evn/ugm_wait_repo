@@ -77,6 +77,14 @@ def get_current_shift() -> str:
         return 'evening'
     return None
 
+async def get_chat_members(chat_id: int) -> List[int]:
+    try:
+        members = await bot.get_chat_administrators(chat_id)
+        return [m.user.id for m in members if not m.user.is_bot and m.user.id not in config['ADMIN_IDS']]
+    except Exception as e:
+        logger.error(f'Ошибка получения участников чата {chat_id}: {e}')
+        return []
+
 async def check_reports():
     current_shift = get_current_shift()
     if not current_shift:
@@ -86,14 +94,8 @@ async def check_reports():
     
     for zone in ['A', 'B']:
         chat_id = config[f'ZONE_{zone}_CHAT_ID']
+        current_members = await get_chat_members(chat_id)
         
-        try:
-            members = await bot.get_chat_administrators(chat_id)
-            current_members = [m.user.id for m in members if not m.user.is_bot and m.user.id not in config['ADMIN_IDS']]
-        except Exception as e:
-            logger.error(f'Ошибка доступа к чату {zone}: {e}')
-            continue
-
         inactive_users = []
         for user_id in current_members:
             last_report = user_last_reports.get(user_id)
@@ -108,7 +110,7 @@ async def check_reports():
                 try:
                     user = await bot.get_chat(user_id)
                     username = user.username or user.first_name
-                    last_time = user_last_reports.get(user_id, None)
+                    last_time = user_last_reports.get(user_id)
                     last_time_str = last_time.strftime('%H:%M:%S') if last_time else "никогда"
                     message += f"• {username} (последний: {last_time_str})\n"
                 except:
