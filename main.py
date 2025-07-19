@@ -2,123 +2,77 @@ import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime, timedelta
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from config import config
-from database import db
-from monitoring import ShiftChecker
+from database import Database  # Импортируем класс, а не экземпляр
 
-# Инициализация бота
+# Инициализация
+storage = MemoryStorage()
 bot = Bot(token=config.BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher(bot, storage=storage)
+db = Database()  # Создаем экземпляр базы данных здесь
 
-async def get_afk_report(minutes_threshold=45):
-    """Генерирует отчет о AFK пользователях"""
-    afk_users = db.get_afk_users(minutes_threshold)
-    if not afk_users:
-        return "Сейчас все сотрудники активны!"
-    
-    report = []
-    for user_id, username, last_active in afk_users:
-        last_active_dt = datetime.strptime(last_active, "%Y-%m-%d %H:%M:%S")
-        afk_duration = datetime.now(config.TIMEZONE) - last_active_dt
-        hours, remainder = divmod(afk_duration.seconds, 3600)
-        minutes = remainder // 60
-        
-        duration_str = f"{hours}ч {minutes}м" if hours else f"{minutes}м"
-        report.append(f"👤 @{username} - AFK {duration_str} (с {last_active_dt.strftime('%H:%M')})")
-    
-    shift_name = ShiftChecker.current_shift_name()
-    return (
-        f"📊 Отчет по AFK ({shift_name} смена, Алматы):\n"
-        f"Порог: {minutes_threshold} минут\n\n" +
-        "\n".join(report)
-)
+async def on_startup(dp):
+    print("Бот запущен!")
+    print(f"Таймзона: {config.TIMEZONE}")
+    print("Рабочие смены:")
+    for i, (start, end) in enumerate(config.WORK_SHIFTS, 1):
+        print(f"{i}. {start.strftime('%H:%M')}-{end.strftime('%H:%M')}")
 
-@dp.message_handler(Command("afk_report"))
-async def send_afk_report(message: types.Message):
-    """Отправляет текущий отчет по AFK"""
-    if not db.is_admin(message.from_user.id):
-        return
-    
-    # Можно указать кастомный порог: /afk_report 30
-    try:
-        threshold = int(message.get_args()) if message.get_args() else 45
-    except ValueError:
-        threshold = 45
-    
-    report = await get_afk_report(threshold)
-    await message.reply(report)
-
-@dp.message_handler(Command("user_status"))
-async def user_status(message: types.Message):
-    """Показывает статус конкретного пользователя"""
-    if not db.is_admin(message.from_user.id):
-        return
-    
-    # Формат: /user_status @username
-    username = message.get_args().strip("@") if message.get_args() else None
-    if not username:
-        await message.reply("Укажите username: /user_status @username")
-        return
-    
-    user_data = db.get_user_by_username(username)
-    if not user_data:
-        await message.reply(f"Пользователь @{username} не найден")
-        return
-    
-    user_id, username, last_active, is_ignored = user_data
-    if is_ignored:
-        await message.reply(f"👤 @{username} - в игнор-листе")
-        return
-    
-    if not last_active:
-        await message.reply(f"👤 @{username} - нет данных о активности")
-        return
-    
-    last_active_dt = datetime.strptime(last_active, "%Y-%m-%d %H:%M:%S")
-    afk_duration = datetime.now(config.TIMEZONE) - last_active_dt
-    
-    hours, remainder = divmod(afk_duration.seconds, 3600)
-    minutes = remainder // 60
-    duration_str = f"{hours}ч {minutes}м" if hours else f"{minutes}м"
-    
-    status = "🟢 Активен" if minutes < 45 else "🔴 AFK"
-    await message.reply(
-        f"👤 @{username}\n"
-        f"🕒 Последняя активность: {last_active_dt.strftime('%H:%M')}\n"
-        f"⏱ Время AFK: {duration_str}\n"
-        f"📊 Статус: {status}"
-    )
-
-async def afk_checker():
-    """Фоновая задача для проверки AFK"""
+async def check_afk():
+    """Фоновая задача для проверки AFK статусов"""
     while True:
-        if ShiftChecker.is_working_time():
-            afk_users = db.get_afk_users(45)
-            if afk_users:
-                report = await get_afk_report()
-                await bot.send_message(config.ADMIN_CHAT_ID, report)
+        afk_users = db.get_afk_users(45)
+        if afk_users:
+            message = "🚨 AFK-тревога!\n"
+            for user_id, username, last_active in afk_users:
+                message += f"👤 @{username} - не активен более 45 мин\n"
+                db.mark_as_notified(user_id)
+            
+            await bot.send_message(config.ADMIN_CHAT_ID, message)
         
         await asyncio.sleep(60)  # Проверка каждую минуту
 
-async def on_startup(dp):
-    """Действия при запуске бота"""
-    print(f"Бот запущен | Таймзона: {config.TIMEZONE}")
-    print(f"Смены: утренняя {config.WORK_SHIFTS[0][0].strftime('%H:%M')}-{config.WORK_SHIFTS[0][1].strftime('%H:%M')}, "
-          f"вечерняя {config.WORK_SHIFTS[1][0].strftime('%H:%M')}-{config.WORK_SHIFTS[1][1].strftime('%H:%M')}")
+@dp.message_handler(chat_id=config.MONITOR_CHAT_ID,
+                  content_types=[types.ContentType.PHOTO, types.ContentType.TEXT])
+async def handle_worker_message(message: types.Message):
+    """Обработчик сообщений в рабочем чате"""
+    user_id = message.from_user.id
+    username = message.from_user.username or f"id{user_id}"
     
-    # Запуск фоновой задачи
-    asyncio.create_task(afk_checker())
+    # Проверяем фото с текстом "макс"
+    if message.photo and "макс" in (message.caption or "").lower():
+        db.update_user_activity(user_id, username)
+        print(f"Обновлена активность для @{username}")
+
+@dp.message_handler(Command("afk_report"))
+async def afk_report(message: types.Message):
+    """Ручная проверка AFK статусов"""
+    if not db.is_admin(message.from_user.id):
+        return
+    
+    afk_users = db.get_afk_users(45)
+    if not afk_users:
+        await message.reply("Сейчас все сотрудники активны!")
+        return
+    
+    report = "📊 Отчет по AFK:\n"
+    for user_id, username, last_active in afk_users:
+        report += f"👤 @{username} - не активен с {last_active}\n"
+    
+    await message.reply(report)
+
+async def main():
+    # Запуск фоновых задач
+    asyncio.create_task(check_afk())
+    
+    # Запуск бота
+    await dp.start_polling()
 
 if __name__ == "__main__":
-    from monitoring import handle_message
+    # Инициализация базы данных
+    db._create_tables()
+    db._add_default_admins()
     
-    # Регистрация обработчиков
-    dp.register_message_handler(
-        handle_message,
-        chat_id=config.MONITOR_CHAT_ID,
-        content_types=[types.ContentType.PHOTO, types.ContentType.TEXT]
-    )
-    
-    executor.start_polling(dp, on_startup=on_startup)
+    # Запуск приложения
+    asyncio.run(main())
