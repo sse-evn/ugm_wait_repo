@@ -66,7 +66,7 @@ async def add_to_ignore_prompt(callback: types.CallbackQuery, state: FSMContext)
     await callback.answer()
 
 @router.message(StateFilter(AdminStates.ADD_TO_IGNORE))
-async def add_to_ignore_handler(message: types.Message, state: FSMContext):
+async def add_to_ignore(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
     except ValueError:
