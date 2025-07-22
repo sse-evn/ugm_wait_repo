@@ -1,13 +1,11 @@
-from aiogram import Router, types, F
+from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.state import StatesGroup, State
 
-from config import Config
 from database import Database
 from keyboards import (
-    admin_keyboard, 
+    admin_keyboard,
     ignore_list_keyboard,
     back_to_admin_keyboard
 )
@@ -20,7 +18,7 @@ class AdminStates(StatesGroup):
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "Admin Panel:",
+        "Админ панель:",
         reply_markup=admin_keyboard()
     )
     await callback.answer()
@@ -29,9 +27,9 @@ async def back_to_admin(callback: types.CallbackQuery):
 async def view_ignore_list(callback: types.CallbackQuery):
     ignored_users = await Database.get_ignore_list()
     if not ignored_users:
-        text = "Ignore list is empty."
+        text = "Игнор-лист пуст."
     else:
-        text = "Ignored Users:\n" + "\n".join(str(user_id) for user_id in ignored_users)
+        text = "Игнорируемые пользователи:\n" + "\n".join(str(user_id) for user_id in ignored_users)
     
     await callback.message.edit_text(
         text,
@@ -46,12 +44,12 @@ async def remove_from_ignore_list(callback: types.CallbackQuery):
     
     ignored_users = await Database.get_ignore_list()
     if not ignored_users:
-        text = "Ignore list is empty."
+        text = "Игнор-лист пуст."
     else:
-        text = "Ignored Users:\n" + "\n".join(str(user_id) for user_id in ignored_users)
+        text = "Игнорируемые пользователи:\n" + "\n".join(str(user_id) for user_id in ignored_users)
     
     await callback.message.edit_text(
-        f"User {user_id} removed from ignore list.\n\n{text}",
+        f"Пользователь {user_id} удален из игнор-листа.\n\n{text}",
         reply_markup=ignore_list_keyboard(ignored_users)
     )
     await callback.answer()
@@ -59,29 +57,26 @@ async def remove_from_ignore_list(callback: types.CallbackQuery):
 @router.callback_query(F.data == "add_to_ignore")
 async def add_to_ignore_prompt(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "Please send the user ID or username to add to the ignore list:",
+        "Отправьте ID пользователя для добавления в игнор-лист:",
         reply_markup=back_to_admin_keyboard()
     )
     await state.set_state(AdminStates.ADD_TO_IGNORE)
     await callback.answer()
 
 @router.message(StateFilter(AdminStates.ADD_TO_IGNORE))
-async def add_to_ignore(message: types.Message, state: FSMContext):
+async def process_add_to_ignore(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
+        await Database.add_to_ignore_list(user_id)
+        await message.answer(
+            f"Пользователь {user_id} добавлен в игнор-лист.",
+            reply_markup=back_to_admin_keyboard()
+        )
     except ValueError:
-        if message.text.startswith("@"):
-            await message.answer("Please provide a numeric user ID instead of username.")
-            return
-        else:
-            await message.answer("Please provide a valid numeric user ID.")
-            return
-    
-    await Database.add_to_ignore_list(user_id)
-    await message.answer(
-        f"User {user_id} added to ignore list.",
-        reply_markup=back_to_admin_keyboard()
-    )
+        await message.answer(
+            "Некорректный ID. Отправьте числовой ID пользователя.",
+            reply_markup=back_to_admin_keyboard()
+        )
     await state.clear()
 
 @router.callback_query(F.data == "generate_afk_report")
@@ -96,4 +91,4 @@ async def generate_afk_report(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "toggle_monitoring")
 async def toggle_monitoring(callback: types.CallbackQuery):
-    await callback.answer("Monitoring toggle not implemented yet")
+    await callback.answer("Функция переключения мониторинга пока не реализована")
