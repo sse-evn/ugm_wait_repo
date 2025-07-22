@@ -1,5 +1,7 @@
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 
 from config import Config
@@ -12,8 +14,8 @@ from keyboards import (
 
 router = Router()
 
-class AdminStates:
-    ADD_TO_IGNORE = "add_to_ignore"
+class AdminStates(StatesGroup):
+    ADD_TO_IGNORE = State()
 
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin(callback: types.CallbackQuery):
@@ -63,22 +65,14 @@ async def add_to_ignore_prompt(callback: types.CallbackQuery, state: FSMContext)
     await state.set_state(AdminStates.ADD_TO_IGNORE)
     await callback.answer()
 
-@router.message(AdminStates.ADD_TO_IGNORE)
+@router.message(StateFilter(AdminStates.ADD_TO_IGNORE))
 async def add_to_ignore_handler(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
     except ValueError:
-        # Maybe it's a username
         if message.text.startswith("@"):
-            username = message.text[1:]
-            try:
-                # Try to resolve username to ID (this is simplified)
-                # In a real bot, you'd need to get this from a message or chat member
-                await message.answer("Please provide a numeric user ID instead of username.")
-                return
-            except Exception:
-                await message.answer("Could not resolve username. Please provide a numeric user ID.")
-                return
+            await message.answer("Please provide a numeric user ID instead of username.")
+            return
         else:
             await message.answer("Please provide a valid numeric user ID.")
             return
@@ -102,5 +96,4 @@ async def generate_afk_report(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "toggle_monitoring")
 async def toggle_monitoring(callback: types.CallbackQuery):
-    # This would require implementing a monitoring toggle state
     await callback.answer("Monitoring toggle not implemented yet")
